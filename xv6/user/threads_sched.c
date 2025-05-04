@@ -172,15 +172,7 @@ struct threads_sched_result schedule_dm(struct threads_sched_args args) {
     struct thread *th, *selected = NULL;
     struct release_queue_entry *cur, *nxt;
 
-    // --- [Loretta][step 1] Release step 开始 ---
-    // printf("[Loretta][step 1] now=%d Release step\n", now);
-    // 打印 release_queue
-    // printf("[Loretta] release_queue:");
-    // list_for_each_entry(cur, args.release_queue, thread_list) {
-    //     printf(" (#%d@%d)", cur->thrd->ID, cur->release_time);
-    // }
-    // printf("\n");
-    // 执行 release
+    // 1) Release step (同前)
     list_for_each_entry_safe(cur, nxt, args.release_queue, thread_list) {
         if (now >= cur->release_time) {
             cur->thrd->remaining_time   = cur->thrd->processing_time;
@@ -190,46 +182,32 @@ struct threads_sched_result schedule_dm(struct threads_sched_args args) {
             free(cur);
         }
     }
-    // 打印 run_queue 状态
-    // printf("[Loretta] after release, run_queue:");
-    // list_for_each_entry(th, args.run_queue, thread_list) {
-    //     printf(" (#%d rt=%d dl=%d)", th->ID, th->remaining_time, th->current_deadline);
-    // }
-    // printf("\n");
 
-    // --- [Loretta][step 2] Deadline‐miss check ---
-    // printf("[Loretta][step 2] Deadline‐miss check\n");
+    // 2) Deadline‐miss check
     struct thread *missed = __check_deadline_miss(args.run_queue, now);
     if (missed) {
-        // printf("[Loretta] missed thread#%d (dl=%d)\n",
-        //        missed->ID, missed->current_deadline);
         r.scheduled_thread_list_member = &missed->thread_list;
         r.allocated_time = 0;
         return r;
     }
 
-    // --- [Loretta][step 3] Select runnable threads ---
-    // printf("[Loretta][step 3] Selecting runnable threads\n");
+    // 3) Gather runnables, pick highest‐priority (shortest period)
     int runnable_count = 0;
     list_for_each_entry(th, args.run_queue, thread_list) {
         if (th->remaining_time > 0) {
             runnable_count++;
-            if (!selected || __dm_thread_cmp(th, selected) < 0)
+            if (!selected || __dm_thread_cmp(th, selected) < 0) {
                 selected = th;
+            }
         }
     }
-    // if (runnable_count > 0) {
-    //     printf("[Loretta] runnable_count=%d, selected thread#%d (rt=%d dl=%d)\n",
-    //            runnable_count,
-    //            selected->ID,
-    //            selected->remaining_time,
-    //            selected->current_deadline);
-    // } else {
-    //     printf("[Loretta] runnable_count=0, no selected thread\n");
+
+    // 4) If no runnables, idle 1 tick
+    // if (runnable_count == 0) {
+    //     r.scheduled_thread_list_member = args.run_queue;
+    //     r.allocated_time = 1;
+    //     return r;
     // }
-
-
-    // --- [Loretta][step 4] Idle or sleep? ---
     if (runnable_count == 0) {
         // printf("[Loretta][step 4] run_queue empty, computing sleep\n");
         int sleep_time = 1;
@@ -245,23 +223,47 @@ struct threads_sched_result schedule_dm(struct threads_sched_args args) {
         return r;
     }
 
-    // --- [Loretta][step 5] Preemption check ---
-    // printf("[Loretta][step 5] Preemption check for thread#%d\n", selected->ID);
+
+    // 5) Check if selected truly has the top priority among runnables:
+    //    no other runnable has a shorter period.
+    // int has_strictly_highest = 1;
+    // list_for_each_entry(th, args.run_queue, thread_list) {
+    //     if (th->remaining_time > 0 && th != selected) {
+    //         if (__dm_thread_cmp(th, selected) < 0) {
+    //             // found someone with an even shorter period
+    //             has_strictly_highest = 0;
+    //             break;
+    //         }
+    //     }
+    // }
+
+    // 6) Preempt‑deadline check
     if (now + 1 > selected->current_deadline) {
-        // printf("[Loretta] will miss deadline if run 1 tick\n");
         r.scheduled_thread_list_member = &selected->thread_list;
         r.allocated_time = 0;
         return r;
     }
 
-    // --- [Loretta][step 6] Dispatch ---
-    // printf("[Loretta][step 6] Dispatching thread#%d for %s ticks\n",
-    //        selected->ID,
-    //        (runnable_count == 1) ? "all remaining" : "1");
+    // 7) Dispatch:
     r.scheduled_thread_list_member = &selected->thread_list;
-    r.allocated_time = (runnable_count == 1)
-                       ? selected->remaining_time
-                       : 1;
+
+    // 7a) 找到下一个周期开始（release_queue 中）且优先级更高的线程释放时间
+    int max_run = selected->remaining_time;
+    list_for_each_entry(cur, args.release_queue, thread_list) {
+        struct thread *t = cur->thrd;
+        // 只看优先级更高的（周期更短，或者周期相同但 ID 更小）
+        if (__dm_thread_cmp(t, selected) < 0) {
+            int dt = cur->release_time - now;
+            if (dt > 0 && dt < max_run) {
+                max_run = dt;
+            }
+        }
+    }
+
+    // 7b) 如果只有它自身 runnable，就可以跑到 max_run（<= remaining_time）
+    //     否则（有同权候选），我们之前已确保选它时是全局最高，
+    //     且无其他 runnable，因此同理用 max_run
+    r.allocated_time = max_run;
     return r;
 }
 
