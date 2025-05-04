@@ -1,0 +1,22 @@
+nmeta 46 (boot, super, log blocks 30 inode blocks 13, bitmap blocks 1) blocks 954 total 1000
+balloc: first 913 blocks have been allocated
+balloc: write bitmap block at sector 45
+*** Now run 'gdb' in another window.
+
+xv6 kernel is booting
+
+init: starting sh
+$ rttask1 DM
+dispatch thread#1 at 0: allocated_time=3
+thread#1 finish one cycle at 3: 2 cycles left
+run_queue is empty, sleep for 1 ticks
+run_queue is empty, sleep for 1 ticks
+dispatch thread#1 at 5: allocated_time=3
+thread#1 finish one cycle at 8: 1 cycles left
+run_queue is empty, sleep for 1 ticks
+run_queue is empty, sleep for 1 ticks
+dispatch thread#1 at 10: allocated_time=3
+thread#1 finish one cycle at 13: 0 cycles left
+
+exited
+$ qemu-system-riscv64: terminating on signal 15 from pid 29226 (make)
