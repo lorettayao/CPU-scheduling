@@ -149,6 +149,7 @@ static struct thread *__check_deadline_miss(struct list_head *run_queue, int cur
 
 #ifdef THREAD_SCHEDULER_DM
 /* Deadline-Monotonic Scheduling */
+// [Loretta]
 static int __dm_thread_cmp(struct thread *a, struct thread *b)
 {
     //To DO
@@ -160,48 +161,108 @@ static int __dm_thread_cmp(struct thread *a, struct thread *b)
         return a->ID - b->ID;
     
 }
+// [Loretta]
+// extern struct list_head run_queue;
+// extern struct list_head release_queue;
 
+// [Loretta]
 struct threads_sched_result schedule_dm(struct threads_sched_args args) {
-    struct thread *selected = NULL;
-    struct thread *th;
+    struct threads_sched_result r;
+    int now = args.current_time;
+    struct thread *th, *selected = NULL;
     struct release_queue_entry *cur, *nxt;
 
-    // Step 1: release threads to run_queue
-    list_for_each_entry_safe(cur, nxt, &release_queue, thread_list) {
-        if (args.now >= cur->release_time) {
-            cur->thrd->remaining_time = cur->thrd->processing_time;
+    // --- [Loretta][step 1] Release step 开始 ---
+    // printf("[Loretta][step 1] now=%d Release step\n", now);
+    // 打印 release_queue
+    // printf("[Loretta] release_queue:");
+    // list_for_each_entry(cur, args.release_queue, thread_list) {
+    //     printf(" (#%d@%d)", cur->thrd->ID, cur->release_time);
+    // }
+    // printf("\n");
+    // 执行 release
+    list_for_each_entry_safe(cur, nxt, args.release_queue, thread_list) {
+        if (now >= cur->release_time) {
+            cur->thrd->remaining_time   = cur->thrd->processing_time;
             cur->thrd->current_deadline = cur->release_time + cur->thrd->deadline;
-            list_add_tail(&cur->thrd->thread_list, &run_queue);
+            list_add_tail(&cur->thrd->thread_list, args.run_queue);
             list_del(&cur->thread_list);
             free(cur);
         }
     }
+    // 打印 run_queue 状态
+    // printf("[Loretta] after release, run_queue:");
+    // list_for_each_entry(th, args.run_queue, thread_list) {
+    //     printf(" (#%d rt=%d dl=%d)", th->ID, th->remaining_time, th->current_deadline);
+    // }
+    // printf("\n");
 
-    // Step 2: check deadline miss
-    struct thread *miss = __check_deadline_miss(&run_queue, args.now);
-    if (miss != NULL) {
-        return (struct threads_sched_result){
-            .selected = NULL,
-            .missed = miss
-        };
+    // --- [Loretta][step 2] Deadline‐miss check ---
+    // printf("[Loretta][step 2] Deadline‐miss check\n");
+    struct thread *missed = __check_deadline_miss(args.run_queue, now);
+    if (missed) {
+        // printf("[Loretta] missed thread#%d (dl=%d)\n",
+        //        missed->ID, missed->current_deadline);
+        r.scheduled_thread_list_member = &missed->thread_list;
+        r.allocated_time = 0;
+        return r;
     }
 
-    // Step 3: select highest priority thread using DM
-    list_for_each_entry(th, &run_queue, thread_list) {
-        if (selected == NULL || __dm_thread_cmp(th, selected) < 0) {
-            selected = th;
+    // --- [Loretta][step 3] Select runnable threads ---
+    // printf("[Loretta][step 3] Selecting runnable threads\n");
+    int runnable_count = 0;
+    list_for_each_entry(th, args.run_queue, thread_list) {
+        if (th->remaining_time > 0) {
+            runnable_count++;
+            if (!selected || __dm_thread_cmp(th, selected) < 0)
+                selected = th;
         }
     }
+    // if (runnable_count > 0) {
+    //     printf("[Loretta] runnable_count=%d, selected thread#%d (rt=%d dl=%d)\n",
+    //            runnable_count,
+    //            selected->ID,
+    //            selected->remaining_time,
+    //            selected->current_deadline);
+    // } else {
+    //     printf("[Loretta] runnable_count=0, no selected thread\n");
+    // }
 
-    // Step 4: remove selected from run_queue
-    if (selected != NULL) {
-        list_del(&selected->thread_list);
+
+    // --- [Loretta][step 4] Idle or sleep? ---
+    if (runnable_count == 0) {
+        // printf("[Loretta][step 4] run_queue empty, computing sleep\n");
+        int sleep_time = 1;
+        list_for_each_entry(cur, args.release_queue, thread_list) {
+            int dt = cur->release_time - now;
+            if (dt > 0 && (sleep_time == 1 || dt < sleep_time))
+                sleep_time = dt;
+        }
+        if (sleep_time < 1) sleep_time = 1;
+        // printf("[Loretta] sleep_time=%d\n", sleep_time);
+        r.scheduled_thread_list_member = args.run_queue;
+        r.allocated_time = sleep_time;
+        return r;
     }
 
-    return (struct threads_sched_result){
-        .selected = selected,
-        .missed = NULL
-    };
+    // --- [Loretta][step 5] Preemption check ---
+    // printf("[Loretta][step 5] Preemption check for thread#%d\n", selected->ID);
+    if (now + 1 > selected->current_deadline) {
+        // printf("[Loretta] will miss deadline if run 1 tick\n");
+        r.scheduled_thread_list_member = &selected->thread_list;
+        r.allocated_time = 0;
+        return r;
+    }
+
+    // --- [Loretta][step 6] Dispatch ---
+    // printf("[Loretta][step 6] Dispatching thread#%d for %s ticks\n",
+    //        selected->ID,
+    //        (runnable_count == 1) ? "all remaining" : "1");
+    r.scheduled_thread_list_member = &selected->thread_list;
+    r.allocated_time = (runnable_count == 1)
+                       ? selected->remaining_time
+                       : 1;
+    return r;
 }
 
     
