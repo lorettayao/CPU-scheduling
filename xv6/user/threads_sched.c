@@ -276,11 +276,14 @@ struct threads_sched_result schedule_dm(struct threads_sched_args args) {
 static int __edf_thread_cmp(struct thread *a, struct thread *b)
 {
     // TO DO
+    if (a->current_deadline < b->current_deadline) return -1;
+    if (a->current_deadline > b->current_deadline) return 1;
+    return (a->ID < b->ID) ? -1 : (a->ID > b->ID);
 }
 //  EDF_CBS scheduler
 struct threads_sched_result schedule_edf_cbs(struct threads_sched_args args)
 {
-    struct threads_sched_result r;
+
 
     // notify the throttle task
     // TO DO
@@ -290,7 +293,126 @@ struct threads_sched_result schedule_edf_cbs(struct threads_sched_args args)
 
     // handle the case where run queue is empty
     // TO DO
+    struct threads_sched_result r;
+    int now = args.current_time;
+    struct thread *th, *selected = NULL;
+    struct release_queue_entry *cur, *nxt;
 
+    // 1) RELEASE: move entries whose release_time <= now into run_queue
+    list_for_each_entry_safe(cur, nxt, args.release_queue, thread_list) {
+        if (now >= cur->release_time) {
+            struct thread *t = cur->thrd;
+            t->remaining_time   = t->processing_time;
+            t->current_deadline = cur->release_time + t->deadline;
+            list_add_tail(&t->thread_list, args.run_queue);
+            list_del(&cur->thread_list);
+            free(cur);
+        }
+    }
+
+    // 2) CBS REPLENISH: for throttled soft tasks whose server deadline == now
+    list_for_each_entry(th, args.run_queue, thread_list) {
+        if (th->is_real_time == 0 && th->cbs.is_throttled
+            && now == th->cbs.throttle_new_deadline) {
+            // replenish
+            th->cbs.remaining_budget = th->cbs.budget;
+            th->cbs.is_throttled     = 0;
+            th->current_deadline     = now + th->period;
+        }
+    }
+
+    // check deadline miss
+    struct thread *missed = __check_deadline_miss(args.run_queue, now);
+    if (missed) {
+        r.scheduled_thread_list_member = &missed->thread_list;
+        r.allocated_time = 0;
+        return r;
+    }   
+
+    // 3) EMPTY QUEUE: if nothing runnable, sleep until the next release
+    if (list_empty(args.run_queue)) {
+        int sleep_time = 1;
+        list_for_each_entry(cur, args.release_queue, thread_list) {
+            int dt = cur->release_time - now;
+            if (dt > 0 && (sleep_time == 1 || dt < sleep_time))
+                sleep_time = dt;
+        }
+        if (sleep_time < 1) sleep_time = 1;
+        r.scheduled_thread_list_member = args.run_queue;
+        r.allocated_time = sleep_time;
+        return r;
+    }
+
+    // 4) EDF SELECT: pick the thread with earliest deadline
+    list_for_each_entry(th, args.run_queue, thread_list) {
+        if (th->remaining_time <= 0) continue;
+        if (!selected || __edf_thread_cmp(th, selected) < 0)
+            selected = th;
+    }
+
+    // 5) CBS ADMISSION / THROTTLE CHECK (only for soft tasks)
+    if (selected->is_real_time == 0) {
+        // if budget exhausted but still work remains → throttle
+        if (selected->cbs.remaining_budget <= 0
+            && selected->remaining_time > 0) {
+            selected->cbs.is_throttled       = 1;
+            selected->cbs.throttle_new_deadline = now + selected->period;
+            // remove from run_queue until deadline
+            list_del(&selected->thread_list);
+            r.scheduled_thread_list_member = args.run_queue;
+            r.allocated_time = selected->cbs.throttle_new_deadline - now;
+            return r;
+        }
+
+        // admission check:
+        int remB = selected->cbs.remaining_budget;
+        int time_left = selected->current_deadline - now;
+        int Q = selected->cbs.budget;
+        int P = selected->period;
+        if (remB * P > Q * time_left) {
+            // over bandwidth → throttle & postpone
+            selected->cbs.is_throttled       = 1;
+            selected->cbs.remaining_budget   = Q;
+            selected->cbs.throttle_new_deadline = now + P;
+            selected->current_deadline       = now + P;
+            // remove until next deadline
+            list_del(&selected->thread_list);
+            r.scheduled_thread_list_member = args.run_queue;
+            r.allocated_time = P;
+            return r;
+        }
+    }
+
+    // 6) DISPATCH
+    // subtract budget if soft
+    int slot = 1;
+    if (selected->is_real_time == 0) {
+        // soft task: can run up to its remaining budget
+        slot = selected->cbs.remaining_budget;
+    } else {
+        // hard task: can run until its deadline (or remaining_time)
+        slot = selected->remaining_time;
+    }
+
+    // But we must not overshoot the server deadline for soft tasks,
+    // nor the task deadline for hard tasks.
+    int time_to_deadline = selected->current_deadline - now;
+    if (slot > time_to_deadline)
+        slot = time_to_deadline;
+
+    // For soft tasks, also cap by remaining_budget
+    if (selected->is_real_time == 0 && slot > selected->cbs.remaining_budget)
+        slot = selected->cbs.remaining_budget;
+
+    // Finally allocate and update state:
+    if (selected->is_real_time == 0) {
+        selected->cbs.remaining_budget -= slot;
+    } else {
+        selected->remaining_time -= slot;
+    }
+    r.scheduled_thread_list_member = &selected->thread_list;
+    r.allocated_time = slot;
     return r;
+
 }
 #endif
