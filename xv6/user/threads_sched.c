@@ -355,11 +355,11 @@ struct threads_sched_result schedule_edf_cbs(struct threads_sched_args args)
         // if budget exhausted but still work remains → throttle
         if (selected->cbs.remaining_budget <= 0
             && selected->remaining_time > 0) {
-            selected->cbs.is_throttled       = 1;
+            selected->cbs.is_throttled = 1;
             selected->cbs.throttle_new_deadline = now + selected->period;
-            // remove from run_queue until deadline
+            // UNLINK *before* returning, but safe because we are not dispatching this node:
             list_del(&selected->thread_list);
-            r.scheduled_thread_list_member = args.run_queue;
+            r.scheduled_thread_list_member = args.run_queue;      // idle
             r.allocated_time = selected->cbs.throttle_new_deadline - now;
             return r;
         }
@@ -371,20 +371,32 @@ struct threads_sched_result schedule_edf_cbs(struct threads_sched_args args)
         int P = selected->period;
         if (remB * P > Q * time_left) {
             // over bandwidth → throttle & postpone
-            selected->cbs.is_throttled       = 1;
-            selected->cbs.remaining_budget   = Q;
+            selected->cbs.is_throttled = 1;
+            selected->cbs.remaining_budget = Q;
             selected->cbs.throttle_new_deadline = now + P;
-            selected->current_deadline       = now + P;
-            // remove until next deadline
+            selected->current_deadline = now + P;
+            // UNLINK the node now
             list_del(&selected->thread_list);
-            r.scheduled_thread_list_member = args.run_queue;
+            r.scheduled_thread_list_member = args.run_queue;      // idle
             r.allocated_time = P;
             return r;
         }
     }
 
+
     // 6) DISPATCH
     // subtract budget if soft
+    // for hard task, slot should be set compared till the releasse queue hightest priority next run time
+    int next_hp_release = INT_MAX;
+    list_for_each_entry(cur, args.release_queue, thread_list) {
+        struct thread *t = cur->thrd;
+        if (t->remaining_time > 0 && t != selected) {
+            int dt = cur->release_time - now;
+            if (dt > 0 && dt < next_hp_release)
+                next_hp_release = dt;
+        }
+    }
+
     int slot = 1;
     if (selected->is_real_time == 0) {
         // soft task: can run up to its remaining budget
@@ -392,6 +404,8 @@ struct threads_sched_result schedule_edf_cbs(struct threads_sched_args args)
     } else {
         // hard task: can run until its deadline (or remaining_time)
         slot = selected->remaining_time;
+        if(next_hp_release < slot && next_hp_release != INT_MAX)
+            slot = next_hp_release;
     }
 
     // But we must not overshoot the server deadline for soft tasks,
@@ -410,7 +424,10 @@ struct threads_sched_result schedule_edf_cbs(struct threads_sched_args args)
     } else {
         selected->remaining_time -= slot;
     }
+   
+
     r.scheduled_thread_list_member = &selected->thread_list;
+
     r.allocated_time = slot;
     return r;
 
