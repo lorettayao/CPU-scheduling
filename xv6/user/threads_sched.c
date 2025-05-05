@@ -388,8 +388,10 @@ struct threads_sched_result schedule_edf_cbs(struct threads_sched_args args)
     // subtract budget if soft
     // for hard task, slot should be set compared till the releasse queue hightest priority next run time
     int next_hp_release = INT_MAX;
+    // struct release_queue_entry *cur;
     list_for_each_entry(cur, args.release_queue, thread_list) {
         struct thread *t = cur->thrd;
+        // only consider releases of tasks with remaining work
         if (t->remaining_time > 0 && t != selected) {
             int dt = cur->release_time - now;
             if (dt > 0 && dt < next_hp_release)
@@ -397,37 +399,29 @@ struct threads_sched_result schedule_edf_cbs(struct threads_sched_args args)
         }
     }
 
-    int slot = 1;
+    int slot;
     if (selected->is_real_time == 0) {
-        // soft task: can run up to its remaining budget
+        // soft task: can only run up to its remaining CBS budget
         slot = selected->cbs.remaining_budget;
     } else {
-        // hard task: can run until its deadline (or remaining_time)
+        // hard task: up to its remaining_time
         slot = selected->remaining_time;
-        if(next_hp_release < slot && next_hp_release != INT_MAX)
+        // but preempt if a higher‐priority release arrives sooner
+        if (next_hp_release < slot)
             slot = next_hp_release;
     }
 
-    // But we must not overshoot the server deadline for soft tasks,
-    // nor the task deadline for hard tasks.
+    // never run past the thread’s deadline
     int time_to_deadline = selected->current_deadline - now;
     if (slot > time_to_deadline)
         slot = time_to_deadline;
 
-    // For soft tasks, also cap by remaining_budget
+    // cap by soft task’s budget again (just in case)
     if (selected->is_real_time == 0 && slot > selected->cbs.remaining_budget)
         slot = selected->cbs.remaining_budget;
 
-    // Finally allocate and update state:
-    if (selected->is_real_time == 0) {
-        selected->cbs.remaining_budget -= slot;
-    } else {
-        selected->remaining_time -= slot;
-    }
-   
-
+    // return the decision
     r.scheduled_thread_list_member = &selected->thread_list;
-
     r.allocated_time = slot;
     return r;
 
